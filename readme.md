@@ -1,78 +1,92 @@
-#Dead Simple Pathfinder
+# Dead Simple Pathfinder
 
-##Installation
+A naive pathfinding library for typescript. Uses a modified A\* algorithm to find the shortest path between two points over a tiled map. Accepts most forms of tiled maps.
+
+## Installation
 
 ```
 npm i DS-Pathfinder
 ```
 
-##Usage
+You can run a simple example project from the test.html file.
+
+## Usage
+
+Create a Pathfinder. It will need a toPosition callback, a fromPosition callback, and a MapType.
 
 ```typescript
 import { Pathfinder } from "ds-pathfinder";
 
-const myMap: {}[][] = [
-  [{ type: "floor" }, { type: "floor" }, { type: "floor" }, { type: "floor" }],
-  [{ type: "stone" }, { type: "stone" }, { type: "floor" }, { type: "floor" }],
-  [{ type: "floor" }, { type: "stone" }, { type: "floor" }, { type: "floor" }],
-  [{ type: "floor" }, { type: "floor" }, { type: "floor" }, { type: "floor" }],
-];
+type Position = {
+  x: number;
+  y: number;
+};
 
-type Tile = myMap[number][number];
+type Tile = {
+  position: Position;
+};
+
+const myTiles = new Map<Tile["position"], Tile>();
 
 const path = new Pathfinder<Tile>({
-  toPosition: (item: Tile) => {
-    for (let y = 0; y < myMap.length; y++) {
-      for (let x = 0; x < myMap[y].length; x++) {
-        if (myMap[y][x] === item) {
-          return {
-            x: x,
-            y: y,
-          };
-        }
-      }
-    }
+  toPosition: (item: Tile): Position => {
+    return item.position;
   },
-  fromPosition: (pos: { x: number; y: number }): Tile | null => {
-    const tile = myMap[y]?.[x];
-    if (tile) {
-      return tile;
-    }
-    return null;
+  fromPosition: (pos: Position): Tile | null => {
+    return myTiles.get(pos) ?? null;
   },
   mapType: "Square",
 });
-
-const styles = document.createElement("style");
-document.body.append(styles);
-styles.innerHTML = `
-.container{
-    display:grid;
-    grid-template-columns: ${`${100 / myMap.length}vh`.repeat(myMap.length)};
-    grid-template-rows: ${`${100 / myMap[0].length}vh`.repeat(myMap[0].length)};
-}
-.container div{
-border: 1px solid black;
-}`;
-
-const container = document.createElement("div");
-document.body.append(container);
-let first, second;
-container.innerHTML = `${myMap.flat().map((item, idx) => {
-  `<div data-x="${idx % myMap[0].length}" data-y="${Math.round(
-    idx / myMap[0].length
-  )}"></div>`;
-})}`;
-container.classList.add("container");
-Array.from(container.querySelectorAll("div")).forEach((ele) => {
-  ele.addEventListener("click", () => {
-    if (second) {
-      second = null;
-      first = ele;
-    } else if (first && first !== ele) {
-      second = ele;
-      path.aStar();
-    }
-  });
-});
 ```
+
+### Pathfinding
+
+Call the algorithm like this:
+
+```typescript
+path.aStar(firstTile, secondTile, options);
+```
+
+You can provide different options as needed.
+
+1. routeLength?: number = Infinity
+
+   Determines the maximum length of any given route. Similar to maxDepth, but only applies as a final filter.
+
+2. includeCostsAtNodes?: boolean = false
+
+   If true, then the returned routes will have the actual costs at each position.
+
+3. includeIncompleteRoutes?: boolean = false
+
+   If true, if not enough complete routes were found to match the requested number in the routes parameter, it will fill the rest with incomplete routes.
+
+4. includeLoopingRoutes?: boolean = false
+
+   If true, routes are allowed to contain loops.
+
+5. onIteration?: (bestRoute: {
+   positions: Position[];
+   positionHash: string;
+   cost: number[]|null;
+   estimate: number;
+   total: number;
+   })=>void;
+
+   If provided, this function will be run on every iteration, and given the current best route.
+
+6. maxDepth?: number = Infinity
+
+   Provides a max depth that any route will be checked. Is a hard limit.
+
+7. routes?: number = 1
+
+   How many unique routes do you want? Sometimes you may want to see a few variations.
+
+8. estimator?: (tile: A, from: A)=>number|null;
+
+   Function that estimates the cost from point a to point b.
+
+9. cost?: (tile: A, from: A)=>number|null;
+
+   Gives the actual cost from point a to point b; only called on adjacent tiles.

@@ -27,60 +27,7 @@ export type AStarResult<A,I extends boolean|undefined> = {
     routes: (I extends true ? {cost: number, node: A}[] : A[])[];
     cache: never;
 }
-/*
-const Resort = <T>(array: T[], idx: number, compare: (a: T, b: T)=>-1|0|1): T[] => {
-	let temp: T;
-	let i = idx;
-	if(array.length <= 1){
-		return array;
-	}
-	while(true){
-		if(i === 0){
-			const val = compare(array[i], array[i+1]);
-			if(val > 0){
-				temp = array[i];
-				array[i] = array[i+1];
-				array[i+1] = temp;
-				i++;
-				continue;
-			}
-			break;
-		}
-		if(i === array.length-1){
-			const val = compare(array[i-1], array[i]);
-			if(val > 0){
-				temp = array[i];
-				array[i] = array[i+1];
-				array[i+1] = temp;
-				i++;
-				continue;
-			}
-			break;
-		}
-		const top = compare(array[i], array[i-1]);
-		const bottom = compare(array[i], array[i+1]);
-		if(top === 0 && bottom === 0){
-			break;
-		}
-		if(top === -1){
-			temp = array[i-1];
-			array[i-1] = array[i];
-			array[i] = temp;
-			continue;
-		}
-		if(bottom === 1){
-			temp = array[i+1];
-			array[i+1] = array[i];
-			array[i] = temp;
-			continue;
-		}
-		break;
 
-
-	}
-	return array;
-}
-*/
 export class Pathfinder<A>{
 
 	private toPosition: (args: A)=>Position;
@@ -89,7 +36,6 @@ export class Pathfinder<A>{
 	public cost: <Z extends A>(tile: Z, from: Z) => number | null;
 	private _mapType: Readonly<MapType>;
 	
-
 	private static _genericFetch = <A>(tile: A, from: A, toPosition: Pathfinder<A>['toPosition']): number => {
 		return Math.abs(toPosition(tile).x - toPosition(from).x) + Math.abs(toPosition(tile).y - toPosition(from).y);
 	}
