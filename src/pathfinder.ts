@@ -1,26 +1,63 @@
-import { hashPosition, isSamePosition, getAdjacentPositions, compareByPriorityList, sum } from "./utilities.js";
+import { hashPosition, isSamePosition, getAdjacentPositions, NestedNonNullish } from "./utilities.js";
 import { MapType, MapTypes } from "./mapType.js";
 import { Position } from "./position.js"; 
+import { PositionMap } from "./positionMap.js";
 
 const UnreachableError = ()=>new Error('Unreachable Code');
 
 type AStarOptions<A, I extends boolean|undefined> = {
-    routeLength?: number;
-    includeCostsAtNodes?: I;
-    includeIncompleteRoutes?: boolean;
-    includeLoopingRoutes?: boolean;
-    onIteration?: (bestRoute: {
-        positions: Position[];
-        positionHash: string;
-        cost: number[]|null;
-        estimate: number;
-        total: number;
-    })=>void|Promise<void>;
+    solutions?:{
+        /**
+         * Include the costs with the positions. This is expensive on performance so beware.
+         */
+        includeCosts?: I;
+        /**
+         * Include routes that loop on themselves. Extremely expensive on performance so beware.
+         */
+        includeLoops?: boolean;
+        /**
+         * Include routes that did not reach the goal; not all possible routes are included, but those that were checked and did not reach the goal are included.
+         */
+        includeIncomplete?: boolean;
+        /**
+         * The type of search to perform. 
+         *  * Fast will return the first route found. Always returns a route if one exists, even if the only route is the best route. Can only be used with Route 1, since some possible routes are discarded during the search.
+         *  * Best will return the best route found. Can be used to find multiple routes, but will be slower than Fast, even if only 1 route is searched for, because it will check that no other routes could be faster.
+         */ 
+        type?: 'Fast'|'Best';
+        /**
+         * The number of routes to find. Default is 1. If you are using Fast, this must be 1 (or left undefined.)
+         */
+        routes?: number;
+        /**
+         * Include routes that are a tie in cost. Useful if you have further culling you want to do that you cannot include in the estimator or cost functions.
+         */
+        includeTies?: boolean;
+    }&({
+        type?: 'Fast';
+        includeIncomplete?: false;
+        includeLoops?: false;
+        includeTies?: false;
+        routes?: 1;
+    }|{
+        type?: 'Fast'|'Best';
+    });
+    /**
+     * The maximum depth to search, based on cost. Default is Infinity.
+     */
     maxDepth?: number;
-    routes?: number;
-    estimator?: (tile: A, from: A)=>number|null;
-    cost?: (tile: A, from: A)=>number|null;
-    cache?: never;
+    /**
+     * The maximum distance to search, based on the number of tiles. Default is Infinity.
+     */
+    maxDistance?: number;
+    /**
+     * The function that determines the heuristic for calculating estimates. Default is the fetch function provided in the constructor.
+     */
+    getEstimate?: (tile: A, from: A)=>number|null;
+    /**
+     * The function that determines the cost to move from one tile to another. Default is the fetch function provided in the constructor.
+     */
+    getCost?: (tile: A, from: A)=>number|null;
 };
 
 export type AStarResult<A,I extends boolean|undefined> = {
@@ -32,8 +69,8 @@ export class Pathfinder<A>{
 
 	private toPosition: (args: A)=>Position;
 	private fromPosition: (Position: Position)=>A|null;
-	public estimator: <Z extends A>(tile: Z, from: Z) => number | null;
-	public cost: <Z extends A>(tile: Z, from: Z) => number | null;
+	public getEstimate: <Z extends A>(tile: Z, from: Z) => number | null;
+	public getCost: <Z extends A>(tile: Z, from: Z) => number | null;
 	private _mapType: Readonly<MapType>;
 	
 	private static _genericFetch = <A>(tile: A, from: A, toPosition: Pathfinder<A>['toPosition']): number => {
@@ -52,63 +89,35 @@ export class Pathfinder<A>{
          * The estimated cost to move from one tile to another. At short ranges, this should be accurate but at long ranges, a heuristic is acceptable.
          * @param tile Whatever object represents a tile.
          * @param from The tile you are moving from. Not strictly necessary but could be useful if you have planes (walls) between tiles, facing, or some similar feature.
-         * @returns The cost to move from one tile to another. If the cost is negative, than some how going this direction is practically like time traveling (not actually but you could use this to represent hyper speeds.) If this returns null, it is considered impassable.
+         * @returns The cost to move from one tile to another. If the cost is negative, than some how going this direction is practically like time traveling (not actually but you could use this to represent hyper speeds, but beware this could cause some strangeness.) If this returns null, it is considered impassable.
          */
-        estimator?: <Z extends A>(tile: Z, from: Z) => number | null;
-        cost?: <Z extends A>(tile: Z, from: Z) => number | null;
+        getEstimate?: <Z extends A>(tile: Z, from: Z) => number | null;
+        /**
+         * The actual cost to move from one tile to another. This will only ever be called for adjacent tiles, so you can (and must) be accurate here.
+         * @param tile Whatever object represents a tile.
+         * @param from The tile you are moving from. Not strictly necessary but could be useful if you have planes (walls) between tiles, facing, or some similar feature.
+         * @returns The cost to move from one tile to another. If the cost is negative, than some how going this direction is practically like time traveling (not actually but you could use this to represent hyper speeds, but beware this could cause some strangeness.) If this returns null, it is considered impassable.
+         */
+        getCost?: <Z extends A>(tile: Z, from: Z) => number | null;
     }) {
 		this.toPosition = options.toPosition;
 		this.fromPosition = options.fromPosition;
 		this._mapType = options.mapType || MapTypes.Square;
-		if(!options.estimator){
-			this.estimator = (a,b)=>Pathfinder._genericFetch(a,b,this.toPosition);
+		if(!options.getEstimate){
+			this.getEstimate = (a,b)=>Pathfinder._genericFetch(a,b,this.toPosition);
 		}
 		else{
-			this.estimator = options.estimator;
+			this.getEstimate = options.getEstimate;
 		}
 
-		if(!options.cost){
-			this.cost = (a,b)=>Pathfinder._genericFetch(a,b,this.toPosition);
+		if(!options.getCost){
+			this.getCost = (a,b)=>Pathfinder._genericFetch(a,b,this.toPosition);
 		}
 		else{
-			this.cost = options.cost;
+			this.getCost = options.getCost;
 		}
 	}
 
-	/**
-    * Determines if a Route is a logical duplicate of another route.
-    * @pure 
-    * @param route 
-    * @param routesToCheck 
-    * @returns 
-    */
-	private static isLogicalDuplicate = <T extends {positions: Position[], positionHash: string}>(route: T, routesToCheck: T[]):boolean => {
-		//const routeHash = route.positions.map(hashPosition).join(',');
-		let count = 0;
-		return routesToCheck.some((routeToCompare)=>{
-			//const routeToCompareHash = routeToCompare.positions.map(hashPosition).join(',');
-			count += route.positionHash === routeToCompare.positionHash ? 1 : 0;
-			if(count > 1){
-				return true;
-			}
-		});
-	}
-
-	/**
-    * Determines if a Route loops on itself at any point.
-    * @pure
-    * @param route 
-    * @returns 
-    */
-	private static isLoopingRoute = <T extends {positions: Position[]}>(route: T): boolean => {
-		return route.positions.some((position, index)=>{
-			for(let i = index+1; i < route.positions.length; i++){
-				if(isSamePosition(position, route.positions[i])){
-					return true;
-				}
-			}
-		});
-	}
 	/**
  * Wraps a fetch function and caches the results. Mostly pure but writes back to the cachedFetches.
  * @param tile 
@@ -118,483 +127,211 @@ export class Pathfinder<A>{
  * @param fromPosition 
  * @returns 
  */
-	private static wrappedAndCachedFetch = <A>(tile: Position, from: Position, cachedFetches: Map<string, number|null>, fetch: <Z extends A>(tile: Z, from: Z)=>number|null, fromPosition: (pos:Position)=> A|null) => {
-		const tHash = hashPosition(tile);
-		const fHash = hashPosition(from);
-		if(tHash === fHash) {
-			return -Infinity;
-		}
-		const hash = `${hashPosition(tile)},${hashPosition(from)}`;
-		if(cachedFetches.has(hash)) {
-			return cachedFetches.get(hash) as number|null;
+	private static wrappedAndCachedFetch = <A>(tile: Position, from: Position, fetch: <Z extends A>(tile: Z, from: Z)=>number|null, fromPosition: (pos:Position)=> A|null, directCompare?: boolean) => {
+		if(directCompare){
+			if(tile === from){
+				return -Infinity;
+			}
 		}
 		else{
-			const fromPos = fromPosition(from) as A;
-			const tilePos = fromPosition(tile) as A;
-			if(tilePos === null){
-				return null;
+			const tHash = hashPosition(tile);
+			const fHash = hashPosition(from);
+			if(tHash === fHash) {
+				return -Infinity;
 			}
-			if(fromPos === null){
-				//This should never happen. This would mean you asked to start from a tile that doesn't exist. Stop that. You should know better.
-				throw UnreachableError();
-			}
-			const cost = fetch(fromPosition(tile) as A, fromPosition(from) as A);
-			cachedFetches.set(hash, cost);
-			return cost;
 		}
+				
+		const fromPos = fromPosition(from) as A;
+		const tilePos = fromPosition(tile) as A;
+		if(tilePos === null){
+			return null;
+		}
+		if(fromPos === null){
+			//This should never happen. This would mean you asked to start from a tile that doesn't exist. Stop that. You should know better.
+			throw UnreachableError();
+		}
+		const cost = fetch(fromPosition(tile) as A, fromPosition(from) as A);
+			
+		return cost;
+		
 	};
 
-	private _aStar = <I extends boolean|undefined = false>(start: Position, end: Position, options?: AStarOptions<A, I>): AStarResult<A,I>  => {
-		const estimator = (options?.estimator ?? this.estimator);
-		const cost = (options?.cost ?? this.cost);
-		if(!estimator) {
-			throw new Error('No fetch function provided.');
-		}
+	/**
+     * Trimmed down version of A* that is more efficient but less flexible.
+     * @param start 
+     * @param end 
+     * @param options {AStarOptions<A, I>}
+     * @returns 
+     */
+	private _AStar = <I extends boolean|undefined = false>(start: Position, end: Position, options?: NestedNonNullish<AStarOptions<A, I>>): AStarResult<A,I> => {
+        
+		const positionMap = new PositionMap();
+		start = positionMap.get(start.x, start.y);
+		
+		const estimator = (options?.getEstimate ?? this.getEstimate);
+		const pricer = (options?.getCost ?? this.getCost);
 
-		const maxDepth = options?.maxDepth  ?? Infinity;
-		if(maxDepth < 1){
-			throw new Error('maxDepth must be greater than 0.');
-		}
-
-		const desiredRouteCount = options?.routes ?? 1;
-		if(desiredRouteCount < 1){
-			throw new Error('routes must be greater than 0.');
-		}
-
-		const routeLength = options?.routeLength  ?? Infinity;
-		if(routeLength < 1){
-			throw new Error('routeLength must be greater than 0.');
-		}
+		let maxDepth = options?.maxDepth ?? Infinity;
+		const desiredRouteCount = options?.solutions?.routes ?? 1;
+		const maxDistance = options?.maxDistance ?? Infinity;
 
         type Item = {
             positions: [Position, ...Position[]];
-            positionHash: string;
-            cost: number[]|null;
+            costs?: number[];
+            costSum: number;
             estimate: number;
             total: number;
         };
-
-        const items: Map<string, Item> = new Map(
-        	[[
-        		hashPosition(start) as string,
-        		{
-        			positions: [start], 
-        			positionHash: hashPosition(start), 
-        			cost: [] as number[], 
-        			estimate: 0, 
-        			total: 0
-        		}
-        	]]);
-        
-        const sureGet = (key: string): Item => {
-        	const item = items.get(key);
-        	if(item){
-        		return item;
-        	}
-        	throw new Error('Item not found.');
-        }
-
+    
         //const checkedPositions = new Set<Position>([]);
         /**
          * The routes that have reached the goal.
          */
-        const successfulRouteHashes = new Set<string>([]);
-        let successfulRouteCount = 0;
-        
-        const touchedPositionCounts = new Map<string, number>([]);
+        const successfulRoutes = new Set<Item>([]);
+        const touchedPositionCounts = new Map<Position, number>([]);
         const incrementTouchedPosition = (position: Position) => {
-        	const count = touchedPositionCounts.get(hashPosition(position)) ?? 0;
-        	if(count !== 0){
-        		console.log('Touched Position:', position, count + 1);
-        	}
-        	touchedPositionCounts.set(hashPosition(position), count + 1);
+        	const count = touchedPositionCounts.get((position)) ?? 0;
+        	touchedPositionCounts.set((position), count + 1);
         }
 
         /**
-         * The routes that are currently being checked, in the order
-         */
-        const activeRouteHashes: string[] = [hashPosition(start)];
-        const activeBacklog: string[] = [];
-        let checkedValidity = false;
-        let bestActiveRoute = sureGet(hashPosition(start));
-        const cachedFetches = new Map<string, number|null>( []);
+        * The routes that are currently being checked, in the order
+        * we start with the start position.
+        */
+        const activeRoutes: Item[] = [];
+    
+        let bestActiveRoute: Item = {
+        	positions: [positionMap.get(start.x, start.y)],
+        	costs: [],
+        	costSum: 0,
+        	estimate: 0,
+        	total: 0,
+        };
+        let tempCost:number|null;
         
+        /**
+         * The sort predicate for the active routes. This is the heart of the A* algorithm.
+         * Traditional A* is f(n)=g(n)+h(n), 
+         * where 
+         *  g(n) is the cost to get to the current node and
+         *  h(n) is the heuristic to get to the end.
+         * Ideally you pick the minimum f(n) to get the best route, and recursively do this until you reach the end.
+         * Here we do something a little more interesting, 
+         * in that we break ties by pick the route whose last position has been touched the least,
+         * which may give you routes that search unexplored space first.
+         * @param a 
+         * @param b 
+         * @returns 
+         */
+        const sortPredicate = (a: Item, b: Item)=>{
+    		const totalDiff = a.total - b.total;
+    		/*if(totalDiff === 0){ 			
+    				const aTouched = touchedPositionCounts.get((a.positions.at(-1) as Position))??0;
+    				const bTouched = touchedPositionCounts.get((b.positions.at(-1) as Position))??0;
+    				return aTouched - bTouched;
+    		}*/
+    		return totalDiff;
+    	}
+
+        /**
+         * Sorts a new route into the active routes. 
+         * Because Active Routes needs to be sorted, we insert them this way because it is much faster than calling the sort method (we know only this new item needs to be determined.)
+         */
+        //Loop variable - declared here for performance reasons.
+        let sortIntoActiveRoutesIndex = 0;
+        const sortIntoActiveRoutes = (item: Item)=>{
+        	
+        	if(activeRoutes.length === 0 || sortPredicate(item, activeRoutes[0]) <= 0){
+        		activeRoutes.unshift(item);
+        	}
+        	for(sortIntoActiveRoutesIndex=1; sortIntoActiveRoutesIndex < activeRoutes.length; sortIntoActiveRoutesIndex++){
+        		if(sortPredicate(item, activeRoutes[sortIntoActiveRoutesIndex]) <= 0){
+        			activeRoutes.splice(sortIntoActiveRoutesIndex, 0, item);
+        			return;
+        		}
+        	}
+        	activeRoutes.push(item);
+        }
+
+        /**
+         * The main loop of the A* algorithm.
+         * Take the best active route and find the next possible routes from it, one step at a time.
+         */
+
+        //Loop variables - declared here for performance reasons.
+        let i:number, j: number;
         do{
-        	//Begin finding new routes.
-        	if(bestActiveRoute.positions.length <= maxDepth){
-        		const from = bestActiveRoute.positions.at(-1) as Position;
-        		const adjacentPositions = getAdjacentPositions(from, this._mapType);
-        		const choices: Item[] = adjacentPositions.map((position) => {
-
-        			const n = this.fromPosition(position);
-        			const m = this.fromPosition(from);
-
-        			return {
-        				positions: [...bestActiveRoute.positions,position],
-        				positionHash: `${bestActiveRoute.positionHash},${hashPosition(position)}`,
-        				cost: n && m && cost(n, m) || null,
-                        
-        			} as {cost: number|null, positions: Position[], positionHash: string, estimate: number|null, total: number|null|undefined};
-        		}).filter(k=>{
-        			if(k.cost !== null){
-        					if(k.positions.length >= 2){
-        						if(touchedPositionCounts.get(hashPosition(k.positions.at(-1) as Position)) ?? 0 > 0){
-        							if(touchedPositionCounts.get(hashPosition(k.positions.at(-2) as Position)) ?? 0 > 0){
-        								return false;
-        							}
-        						}
-        					}
-        				return true;
-        				}
-        		}).map(item=>{
-        			item.estimate = Pathfinder.wrappedAndCachedFetch(end, item.positions.at(-1) as Position, cachedFetches, estimator, this.fromPosition);
-        			return item as Omit<Item, 'cost'>&{cost: number};
-        		}).filter(k=>k.estimate !== null).map(item=>{
-        				const singleCost = item.cost as number;
-        				const totalCost = [...bestActiveRoute.cost??[], singleCost];
-        				const thisItem: Item = item as unknown as Item;
-        			thisItem.cost = totalCost;
-        			thisItem.total = sum(...totalCost) + item.estimate;
-        			return thisItem;
-        		})
-
-        		if(choices.length !== 0){
-        			choices.forEach((choice)=>{
-        				if(!(options?.includeLoopingRoutes ?? false)){
-        					if(new Set(choice.positions).size !== choice.positions.length){
-        						return;
-        					}
-        					items.set(choice.positionHash, choice);
-        					if(Pathfinder.isLoopingRoute(choice)){
-        						items.delete(choice.positionHash);
-        						return;
-        					}
-        				}
-        				if(isSamePosition(choice.positions.at(-1) as Position, end)){
-        					items.set(choice.positionHash, choice);
-        					successfulRouteHashes.add(choice.positionHash);
-        					successfulRouteCount++;
-        					return;
-        				}
-        				
-        				if((options?.includeLoopingRoutes ?? false)){
-        				    items.set(choice.positionHash, choice);
-        				}
-       
-        				
-        				incrementTouchedPosition(choice.positions.at(-1) as Position);
-        				activeRouteHashes.unshift(choice.positionHash);
-        				if(options?.onIteration){
-        					console.log(activeRouteHashes.length, bestActiveRoute)
-        					options?.onIteration(choice);
-        				}		
-        			});
-        		}
-        	}
-        	    
-        	items.delete(bestActiveRoute.positionHash);
-        	activeRouteHashes.splice(activeRouteHashes.indexOf(bestActiveRoute.positionHash), 1);
-        	const sortPredicate = (a: string, b: string)=>{
-        		const aSide = items.get(a) as Item;
-        		const bSide = items.get(b) as Item;
-        		const totalDiff = aSide.total - bSide.total;
-        		if(totalDiff === 0){
-        			const totalCostDiff = sum(...bSide.cost as number[]) - sum(...aSide.cost as number[]);
-        			if(totalCostDiff === 0){
-        			const aTouched = touchedPositionCounts.get(hashPosition(aSide.positions.at(-1) as Position))??0;
-        			const bTouched = touchedPositionCounts.get(hashPosition(bSide.positions.at(-1) as Position))??0;
-        			console.log('identical totals, ising touched position counts', aTouched, bTouched); 
-        			return aTouched - bTouched;
+        	if(bestActiveRoute.total <= maxDepth && bestActiveRoute.positions.length < maxDistance){
+        		const choices: (Position|Partial<Item>)[] = getAdjacentPositions(bestActiveRoute.positions.at(-1) as Position, this._mapType, positionMap);
+        		createLoop:
+        		for(i = 0; i < choices.length; i++){
+        			choices[i] = {
+        				positions: [...bestActiveRoute.positions, choices[i] as Position],
         			}
-        			return totalCostDiff;
-        		}
-        		return totalDiff;
-        	}
-        	
-        	activeRouteHashes.sort(sortPredicate);
-        	
-        	
-
-        	if(activeRouteHashes.length > 100 && !checkedValidity){
-        		checkedValidity = true;
-        		if(getAdjacentPositions(start, this._mapType).length === 0){
-        			break;
-        		}
-        		if(getAdjacentPositions(end, this._mapType).length === 0){
-        			break;
-        		}
-        	}
-        	if(activeRouteHashes.length === 0){
-        		if(activeBacklog.length === 0){
-        			break;
-        		}
-        		else{
-        			console.log('Filling from backlog');
-        			const chunk = activeBacklog.splice(0, 25);
-        			chunk.forEach((hash)=>{
-        				activeRouteHashes.push(hash);
-        				
-        			});
-        		}
-        	}
-        	bestActiveRoute = sureGet(activeRouteHashes[0]);
-        }while(successfulRouteCount < desiredRouteCount && (activeRouteHashes.length > 0 || activeBacklog.length > 0));
-        const routes = Array.from(successfulRouteHashes.values()).map((hash)=>items.get(hash) as Item);
-        if(desiredRouteCount > routes.length && options?.includeIncompleteRoutes){
-        	routes.push(...Array.from(items.values()).filter((route)=>!activeRouteHashes.includes(route.positionHash)));
-        	if(desiredRouteCount > routes.length){
-        		routes.push(...Array.from(items.values()).filter((route)=>!activeRouteHashes.includes(route.positionHash)));
-        	}
-        }
-        
-        const includeCostsAtNodes = (options?.includeCostsAtNodes ?? false) as I;
-
-        const result = {
-        	routes: routes.sort((a,b)=>compareByPriorityList([sum(...a.cost??[]), a.positions.length],[ sum(...b.cost??[], b.positions.length)])).filter((_, index)=>index < desiredRouteCount).map((route)=>{
-        		//cast because typescript is dumb.
-        		let item: (I extends true ? { cost: number; node: A; }[] : A[]);
-        		if(includeCostsAtNodes === true){
-        			item = route.positions.map(
-        				(v,idx)=>({
-        					cost: route.cost?.[idx] as number, 
-        					node: this.fromPosition(v)
-        				})) as (I extends true ? { cost: number; node: A; }[] : A[])
-        		}
-        		else{
-        			item = route.positions.map(this.fromPosition) as (I extends true ? { cost: number; node: A; }[] : A[]);
-        		}
-        		return item;
-        	}),
-        	cache:undefined as never,
-            
-        };
-        return result;
-	}
-
-	private  _asyncAStar = async <I extends boolean|undefined = false>(start: Position, end: Position, options?: AStarOptions<A, I>): Promise<AStarResult<A,I>>  => {
-        
-		const estimator = (options?.estimator ?? this.estimator);
-		const cost = (options?.cost ?? this.cost);
-		if(!estimator) {
-			throw new Error('No fetch function provided.');
-		}
-
-		const maxDepth = options?.maxDepth  ?? Infinity;
-		if(maxDepth < 1){
-			throw new Error('maxDepth must be greater than 0.');
-		}
-
-		const desiredRouteCount = options?.routes ?? 1;
-		if(desiredRouteCount < 1){
-			throw new Error('routes must be greater than 0.');
-		}
-
-		const routeLength = options?.routeLength  ?? Infinity;
-		if(routeLength < 1){
-			throw new Error('routeLength must be greater than 0.');
-		}
-
-        type Item = {
-            positions: [Position, ...Position[]];
-            positionHash: string;
-            cost: number[]|null;
-            estimate: number;
-            total: number;
-        };
-
-        const items: Map<string, Item> = new Map(
-        	[[
-        		hashPosition(start) as string,
-        		{
-        			positions: [start], 
-        			positionHash: hashPosition(start), 
-        			cost: [] as number[], 
-        			estimate: 0, 
-        			total: 0
-        		}
-        	]]);
-        
-        const sureGet = (key: string): Item => {
-        	const item = items.get(key);
-        	if(item){
-        		return item;
-        	}
-        	throw new Error('Item not found.');
-        }
-
-        //const checkedPositions = new Set<Position>([]);
-        /**
-         * The routes that have reached the goal.
-         */
-        const successfulRouteHashes = new Set<string>([]);
-        let successfulRouteCount = 0;
-        
-        const touchedPositionCounts = new Map<string, number>([]);
-        const incrementTouchedPosition = (position: Position) => {
-        	const count = touchedPositionCounts.get(hashPosition(position)) ?? 0;
-        	if(count !== 0){
-        		console.log('Touched Position:', position, count + 1);
-        	}
-        	touchedPositionCounts.set(hashPosition(position), count + 1);
-        }
-
-        /**
-         * The routes that are currently being checked, in the order
-         */
-        const activeRouteHashes: string[] = [hashPosition(start)];
-        const activeBacklog: string[] = [];
-        let checkedValidity = false;
-        let bestActiveRoute = sureGet(hashPosition(start));
-        const cachedFetches = new Map<string, number|null>( []);
-        
-        do{
-        	//Begin finding new routes.
-        	if(bestActiveRoute.positions.length <= maxDepth){
-        		const from = bestActiveRoute.positions.at(-1) as Position;
-        		const adjacentPositions = getAdjacentPositions(from, this._mapType);
-        		const choices: Item[] = adjacentPositions.map((position) => {
-        			return {
-        				positions: [...bestActiveRoute.positions,position],
-        				positionHash: `${bestActiveRoute.positionHash},${hashPosition(position)}`,
-        				cost: Pathfinder.wrappedAndCachedFetch(position, from, cachedFetches, cost, this.fromPosition),
-        			} as {cost: number|null, positions: Position[], positionHash: string, estimate: number|null, total: number|null|undefined};
-        		}).filter(k=>{
-        			if(k.cost !== null){
-        					if(k.positions.length >= 2){
-        						if(touchedPositionCounts.get(hashPosition(k.positions.at(-1) as Position)) ?? 0 > 0){
-        							if(touchedPositionCounts.get(hashPosition(k.positions.at(-2) as Position)) ?? 0 > 0){
-        								return false;
-        							}
-        						}
-        					}
-        				return true;
-        				}
-        		}).map(item=>{
-        			item.estimate = Pathfinder.wrappedAndCachedFetch(end, item.positions.at(-1) as Position, cachedFetches, estimator, this.fromPosition);
-        			return item as Omit<Item, 'cost'>&{cost: number};
-        		}).filter(k=>k.estimate !== null).map(item=>{
-        				const singleCost = item.cost as number;
-        				const totalCost = [...bestActiveRoute.cost??[], singleCost];
-        				const thisItem: Item = item as unknown as Item;
-        			thisItem.cost = totalCost;
-        			thisItem.total = sum(...totalCost) + item.estimate;
-        			return thisItem;
-        		})
-
-        		if(choices.length !== 0){
-        			await Promise.all(choices.map(async (choice)=>{
-        				if(!(options?.includeLoopingRoutes ?? false)){
-        					if(new Set(choice.positions).size !== choice.positions.length){
-        						return;
-        					}
-        					items.set(choice.positionHash, choice);
-        					if(Pathfinder.isLoopingRoute(choice)){
-        						items.delete(choice.positionHash);
-        						return;
+        			if(options?.solutions?.includeLoops !== true && (choices[i] as Item).positions.length >= 3){
+        				for(j = (choices[i] as Item).positions.length - 2; j > 0; j--){
+        					if((choices[i] as Item).positions[j] === (choices[i] as Item).positions.at(-1)){
+        						choices.splice(i, 1);
+        						i--;
+        						continue createLoop;
         					}
         				}
-        				if(isSamePosition(choice.positions.at(-1) as Position, end)){
-        					items.set(choice.positionHash, choice);
-        					successfulRouteHashes.add(choice.positionHash);
-        					successfulRouteCount++;
-        					return;
+        				incrementTouchedPosition((choices[i] as Item).positions.at(-1) as Position);
+        				if(options?.solutions.type === 'Fast' && touchedPositionCounts.get((choices[i] as Item).positions.at(-1) as Position) as number > 3){
+        					choices.splice(i, 1);
+        					i--;
+        					continue;
         				}
-        				
-        				if((options?.includeLoopingRoutes ?? false)){
-        				    items.set(choice.positionHash, choice);
-        				}
-       
-        				
-        				incrementTouchedPosition(choice.positions.at(-1) as Position);
-        				activeRouteHashes.unshift(choice.positionHash);
-        				if(options?.onIteration){
-        					console.log(activeRouteHashes.length, bestActiveRoute)
-        					const out = options?.onIteration(choice);
-        					if(out && typeof out === 'object' && out instanceof Promise){
-        						await out;
-        					}
-        				}
-        				
-        			}));
-        		}
-        	}
-        	    
-        	items.delete(bestActiveRoute.positionHash);
-        	activeRouteHashes.splice(activeRouteHashes.indexOf(bestActiveRoute.positionHash), 1);
-        	const sortPredicate = (a: string, b: string)=>{
-        		const aSide = items.get(a) as Item;
-        		const bSide = items.get(b) as Item;
-        		const totalDiff = aSide.total - bSide.total;
-        		if(totalDiff === 0){
-        			const totalCostDiff = sum(...bSide.cost as number[]) - sum(...aSide.cost as number[]);
-        			if(totalCostDiff === 0){
-        			const aTouched = touchedPositionCounts.get(hashPosition(aSide.positions.at(-1) as Position))??0;
-        			const bTouched = touchedPositionCounts.get(hashPosition(bSide.positions.at(-1) as Position))??0;
-        			console.log('identical totals, ising touched position counts', aTouched, bTouched); 
-        			return aTouched - bTouched;
+        			} 
+        			tempCost = Pathfinder.wrappedAndCachedFetch((choices[i] as Item).positions.at(-1) as Position, bestActiveRoute.positions.at(-1) as Position, pricer, this.fromPosition, true);
+        			if(tempCost === null){
+        				choices.splice(i, 1);
+        				i--;
+        				continue;
         			}
-        			return totalCostDiff;
+        			(choices[i] as {estimate: number|null}).estimate = Pathfinder.wrappedAndCachedFetch(end, bestActiveRoute.positions.at(-1) as Position, estimator, this.fromPosition, true);
+        			if((choices[i] as Partial<Item>).estimate === null){
+        				choices.splice(i, 1);
+        				i--;
+        				continue;
+        			}
+        			if(options?.solutions?.includeCosts){
+        				(choices[i] as Item).costs = [...bestActiveRoute.costs??[], tempCost as number];
+        			}
+        			(choices[i] as Item).costSum = bestActiveRoute.costSum + tempCost as number;
+        			(choices[i] as Item).total = (choices[i] as Item).costSum as number + (choices[i] as Item).estimate;
+        			incrementTouchedPosition((choices[i] as Item).positions.at(-1) as Position);	
         		}
-        		return totalDiff;
+        		/**
+                 * Loop over the new choices and decide what to do with them.
+                 * This loop is labeled so that we can continue it from inside the loop that checks for loopbacks.
+                 */
+        		for(i=0; i < choices.length; i++){
+        			/*
+                    if(!(options?.includeLoopingRoutes ?? false)){
+        				for(j = 0; j < (choices[i] as Item).positions.length-1; j++){
+        					if((choices[i] as Item).positions[j] === (choices[i] as Item).positions.at(-1)){
+        						continue loop1;
+        					}
+        				}
+        			}
+                    */
+        			if(isSamePosition((choices[i] as Item).positions.at(-1) as Position, end)){
+        				successfulRoutes.add((choices[i] as Item));
+        				maxDepth = Math.min(maxDepth, (choices[i] as Item).total);
+        				continue;
+        			}
+        			sortIntoActiveRoutes(choices[i] as Item);
+        		}
         	}
+        	bestActiveRoute = activeRoutes.shift() as Item;
         	
-        	activeRouteHashes.sort(sortPredicate);
-        	
-        	
-
-        	if(activeRouteHashes.length > 100 && !checkedValidity){
-        		checkedValidity = true;
-        		if(getAdjacentPositions(start, this._mapType).length === 0){
-        			break;
-        		}
-        		if(getAdjacentPositions(end, this._mapType).length === 0){
-        			break;
-        		}
-        	}
-        	if(activeRouteHashes.length === 0){
-        		if(activeBacklog.length === 0){
-        			break;
-        		}
-        		else{
-        			console.log('Filling from backlog');
-        			const chunk = activeBacklog.splice(0, 25);
-        			chunk.forEach((hash)=>{
-        				activeRouteHashes.push(hash);
-        				
-        			});
-        		}
-        	}
-        	bestActiveRoute = sureGet(activeRouteHashes[0]);
-        }while(successfulRouteCount < desiredRouteCount && (activeRouteHashes.length > 0 || activeBacklog.length > 0));
-        const routes = Array.from(successfulRouteHashes.values()).map((hash)=>items.get(hash) as Item);
-        if(desiredRouteCount > routes.length && options?.includeIncompleteRoutes){
-        	routes.push(...Array.from(items.values()).filter((route)=>!activeRouteHashes.includes(route.positionHash)));
-        	if(desiredRouteCount > routes.length){
-        		routes.push(...Array.from(items.values()).filter((route)=>!activeRouteHashes.includes(route.positionHash)));
-        	}
-        }
-        
-        const includeCostsAtNodes = (options?.includeCostsAtNodes ?? false) as I;
-
+        }while((activeRoutes.length > 0) && (options?.solutions?.type === 'Best' || successfulRoutes.size < desiredRouteCount));
+        const routes = Array.from(successfulRoutes.values());
         const result = {
-        	routes: routes.sort((a,b)=>compareByPriorityList([sum(...a.cost??[]), a.positions.length],[ sum(...b.cost??[], b.positions.length)])).filter((_, index)=>index < desiredRouteCount).map((route)=>{
-        		//cast because typescript is dumb.
-        		let item: (I extends true ? { cost: number; node: A; }[] : A[]);
-        		if(includeCostsAtNodes === true){
-        			item = route.positions.map(
-        				(v,idx)=>({
-        					cost: route.cost?.[idx] as number, 
-        					node: this.fromPosition(v)
-        				})) as (I extends true ? { cost: number; node: A; }[] : A[])
-        		}
-        		else{
-        			item = route.positions.map(this.fromPosition) as (I extends true ? { cost: number; node: A; }[] : A[]);
-        		}
-        		return item;
-        	}),
-        	cache:undefined as never,
-            
-        };
+    	    routes: routes.map((route)=>route.positions.map(this.fromPosition)),
+    	    cache:undefined as never,
+        } as unknown as AStarResult<A, I>;
         return result;
 	}
 
@@ -615,19 +352,32 @@ export class Pathfinder<A>{
      * @returns 
      */
 	public aStar = <I extends boolean|undefined = false>(start: A, end: A, options?: AStarOptions<A, I>): AStarResult<A, I>  => {
-		return this._aStar(this.toPosition(start), this.toPosition(end), options);
-	}
-	
-	public aStarAsync = async <I extends boolean|undefined = false>(start: A, end: A, options?: AStarOptions<A, I>): Promise<AStarResult<A, I>> => {
-		return this._asyncAStar(this.toPosition(start), this.toPosition(end), options);
-	}
 
-	public tileDistance = (start: A, end: A): number => {
-		return this.aStar(start, end, {
-			routes: 1,
-			cost: ()=>1,
-			estimator: this.estimator,
-			includeCostsAtNodes: false,
-		}).routes[0].length - 1;
+		const calculatedOptions: NestedNonNullish<AStarOptions<A, I>> = {
+			solutions: {
+				includeCosts: (options?.solutions?.includeCosts ?? false) as NestedNonNullish<I>,
+				includeIncomplete: options?.solutions?.includeIncomplete ?? false,
+				includeLoops: options?.solutions?.includeLoops ?? false,
+				type: options?.solutions?.type ?? 'Best',
+				routes: options?.solutions?.routes ?? 1,
+				includeTies: options?.solutions?.includeTies ?? false,
+			},
+			maxDepth: options?.maxDepth ?? Infinity,
+			maxDistance: options?.maxDistance ?? Infinity,
+			getEstimate: options?.getEstimate ?? this.getEstimate,
+			getCost: options?.getCost ?? this.getCost,
+		};
+
+		if(typeof calculatedOptions.maxDepth !== 'number' || isNaN(calculatedOptions.maxDepth) || calculatedOptions.maxDepth < 1){
+			throw new Error('maxDepth must be greater than 0.');
+		}
+		if(typeof calculatedOptions.solutions.routes !== 'number' || isNaN(calculatedOptions.solutions.routes) || calculatedOptions.solutions.routes < 1){
+			throw new Error('routes must be greater than 0.');
+		}
+		if(typeof calculatedOptions.maxDistance !== 'number' || isNaN(calculatedOptions.maxDistance) || calculatedOptions.maxDistance < 1){
+			throw new Error('routeLength must be greater than 0.');
+		}
+        
+		return this._AStar(this.toPosition(start), this.toPosition(end), calculatedOptions);
 	}
 }

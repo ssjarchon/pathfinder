@@ -1,9 +1,9 @@
 {
   "name": "ds-pathfinder",
-  "version": "0.0.2",
+  "version": "0.0.6",
   "description": "A pathfinding library for typescript. Uses a modified A* algorithm to find the shortest path between two points over a tiled map.",
   "main": "dist/index.js",
-  "files": ["dist","!dist/**/sample.*"],
+  "files": ["dist","!dist/**/sample.*", "readme.md"],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc"

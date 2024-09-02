@@ -1,110 +1,73 @@
 import { Pathfinder } from "./pathfinder.js";
 
-const xSize = 80;
-const ySize = 50;
+const xSize = 100;
+const ySize = 200;
 
-const myGrid: {type: string}[][] = [/*
-	[{ type: "floor" }, { type: "floor" }, { type: "floor" }, { type: "floor" }],
-	[{ type: "stone" }, { type: "stone" }, { type: "floor" }, { type: "floor" }],
-	[{ type: "floor" }, { type: "stone" }, { type: "floor" }, { type: "stone" }],
-	[{ type: "floor" }, { type: "floor" }, { type: "floor" }, { type: "floor" }],
-	[{ type: "floor" }, { type: "stone" }, { type: "stone" }, { type: "floor" }],
-	[{ type: "floor" }, { type: "floor" }, { type: "floor" }, { type: "floor" }],*/
-];
+    type Tile =  {
+        type: "floor"|"stone"|"water"|"lava"|"wall"
+        x: number;
+        y: number;
+        element: HTMLElement;
+    };
 
-for (let x = 0; x < xSize; x++) {
-	const row = [];
-	for (let y = 0; y < ySize; y++) {
-		row.push({
-			type: Math.random() > 0.3 ? "floor" :  Math.random() > 0.1 ? "stone" : "water"
-		});
-	}
-	myGrid.push(row);
-}
+const myGrid = Array.from({ length: xSize }, (y) => Array.from({ length: ySize }, (x) => ({ 
+	type: Math.random() < 0.3 ? "stone" : Math.random() < 0.1 ? "water" : Math.random() < 0.1 ? "lava" : "floor" ,
+	x: x,
+	y: y,
+	element: undefined as unknown as HTMLElement
+}as Tile)
+));
 
-for (let x = 0; x < xSize; x++) {
-	const row = myGrid[x];
-	for (let y = 0; y < ySize; y++) {
-		const item = row[y];
-		if (item.type === "wall") {
-			continue;
-		}
-		const adjacent = [
-			myGrid[x]?.[y - 1],
-			myGrid[x + 1]?.[y],
-			myGrid[x]?.[y + 1],
-			myGrid[x - 1]?.[y],
-		].filter((item) => item && item.type === 'water').length;
-        
-		switch (adjacent) {
-		case 0: 
-			row[y] = { type: Math.random() < 0.001 ? "lava" : row[y].type };
-			if(row[y].type === "lava"){
-				[
-					myGrid[x]?.[y - 1],
-					myGrid[x + 1]?.[y],
-					myGrid[x]?.[y + 1],
-					myGrid[x - 1]?.[y],
-				].forEach((item) => {
-					if(item && item.type === "floor"){
-						item.type = "lava";
-					}
-				});
-			}
-			break;
-		case 1:
-			row[y] = { type: Math.random() < 0.2 ? "water" : row[y].type };
-			break;
-		case 2:
-			row[y] = { type: Math.random() < 0.9 ? "water" : row[y].type };
-			break;
-		case 3:
-			row[y] = { type: Math.random() < 0.9 ? "water" : "floor" };
-			break;
-		case 4:
-			row[y] = { type: Math.random() < 0.01 ? "water" : "floor" };
-			break;
-		}
-		
-	}
-	myGrid[x] = row;
-}
-
-const Tiles = myGrid.map((row, x) => {
+const Tiles: Tile[] = myGrid.map((row, x) => {
 	return row.map((item, y) => {
 		return {
 			...item,
 			x: x,
 			y: y,
 			element: undefined as unknown as HTMLElement
-		};
+		} as Tile;
 	})
 }).flat();
 
-type Tile = typeof Tiles[0];
+
+
+console.log(JSON.stringify(myGrid));
+
+const maps = new Map<number, Map<number, Tile>>();
+Tiles.forEach((item)=>{
+	if(!maps.has(item.x)){
+		maps.set(item.x, new Map<number, Tile>());
+	}
+	maps.get(item.x)?.set(item.y, item);
+});
 
 const path = new Pathfinder<Tile>({
 	toPosition: (item: Tile) => {
 		return item;
 	},
 	fromPosition: (pos: { x: number; y: number }): Tile | null => {
-		return Tiles.find((item) => item.x === pos.x && item.y === pos.y) || null;
-	},
-	cost: (tile: Tile, destination: Tile) => {
-		let z = 0;
+		return (maps.get(pos.x))?.get(pos.y) || null;
+	},getEstimate:
+    (tile: Tile, destination: Tile) => {
+
+    	return  Math.abs(tile.x-destination.x) + Math.abs(tile.y-destination.y);
+    },
+	getCost: (_: Tile, destination: Tile) => {
+
 		switch(destination.type){
 		case "lava":
-			z+=20;
-			break;
+			return 21;
+			
 		case "water":
-			z+=2;
-			break;
+			return 3;
+			
 		case "stone":
 			return null;
-		case "floor":
-			break;
+		default:
+			return 1;
+			
 		}
-		return z + Math.abs(tile.x-destination.x) + Math.abs(tile.y-destination.y);
+		
 	},
 	mapType: "Square",
 });
@@ -122,7 +85,7 @@ styles.innerHTML = `
 
 .container div{
 position:relative;
-    border: 1px solid black;
+    
     background-color: white;
     transition: background-color .5s;
     align-items: center;
@@ -175,6 +138,19 @@ container.innerHTML = `${Tiles.map((item, idx) => {
 }).join('')}`;
 
 container.classList.add("container");
+
+//@ts-expect-error adding clear to window
+window.clear = ()=>{
+	Tiles.forEach((item)=>{
+		item.type = "floor";
+		if(item.element){
+			item.element.setAttribute('class','');
+			item.element.classList.add("floor");
+			item.element.innerText = "";
+		}
+	});
+}
+
 Array.from(container.querySelectorAll('div')).forEach((ele, idx)=>{
 
 	Tiles[idx].element = ele as HTMLElement;
@@ -190,6 +166,36 @@ Array.from(container.querySelectorAll('div')).forEach((ele, idx)=>{
 			item.element.classList.add("lava");
 	}
 	const cancel = 0;
+	ele.addEventListener('contextmenu',(e)=>{
+
+		item.type = item.type === "stone" ? "floor" : "stone";
+
+		item.element?.classList.remove("floor");
+		item.element?.classList.remove("wall");
+
+		if(item.type === "floor")
+			item.element.classList.add("floor");
+		else if(item.type === "stone")
+			item.element.classList.add("wall");
+
+		e.preventDefault();
+	});
+	ele.addEventListener('mouseenter',(e)=>{
+		if(e.buttons === 2){
+			console.log("right click");
+			item.type = item.type === "stone" ? "floor" : "stone";
+
+			item.element?.classList.remove("floor");
+			item.element?.classList.remove("wall");
+
+			if(item.type === "floor")
+				item.element.classList.add("floor");
+			else if(item.type === "stone")
+				item.element.classList.add("wall");
+
+			e.preventDefault();
+		}
+	});
 	ele.addEventListener('click',async()=>{
 		clearTimeout(cancel);
 		if(second){
@@ -198,8 +204,6 @@ Array.from(container.querySelectorAll('div')).forEach((ele, idx)=>{
 		}
 		else if(first && first !== ele){
 			second = ele;
-
-			
 
 			const firstTile = Tiles.find(k=>k.element === first);
 			const secondTile = Tiles.find(k=>k.element === second);
@@ -216,36 +220,20 @@ Array.from(container.querySelectorAll('div')).forEach((ele, idx)=>{
 					}
 				});
 				const start = performance.now()+performance.timeOrigin;
-				let end = start;
+				
 				const callback = ()=>{
-					if(end === start){
-						window.requestAnimationFrame(()=>{
-							report.innerHTML = `Pathfinding took ${(performance.now()+performance.timeOrigin)-start}ms`;
-						});
-					}
+					//if(end === start){
+					//	window.requestAnimationFrame(()=>{
+					report.innerHTML = `Pathfinding took ${(performance.now()+performance.timeOrigin)-start}ms`;
+					//	});
+					//}
 				}
-				const walk = await path.aStarAsync(firstTile, secondTile, {
-					includeCostsAtNodes: true,
-					includeIncompleteRoutes: true,
-					includeLoopingRoutes: true,
-					
-					onIteration: async(r)=>{
-						const pos = r.positions.at(-1);
-						if(pos){
-							const tile = Tiles.find(t=>{
-								return t.x === pos.x && t.y === pos.y;
-							});
-							if(tile && tile.element){
-								tile.element.classList.add("search");
-								tile.element.innerText = `${(r.cost??[]).reduce((a,b)=>a+b, 0)}`;
-								await new Promise((res)=>window.requestAnimationFrame(res));
-							}
-						}
-						//callback();
-						//console.log(r)}
-				    }});
+				const walk = path.aStar(firstTile, secondTile, {
+					solutions: {type:'Fast'}
+				    });
+				
+				
 				callback();
-				end = performance.now()+performance.timeOrigin;
 				//report.innerHTML = `Pathfinding took ${end-start}ms`;
 				if(walk.routes.length === 0){
 					first.classList.add("start");
@@ -263,16 +251,17 @@ Array.from(container.querySelectorAll('div')).forEach((ele, idx)=>{
 							
 						}
 					});
+					console.log('Solutions:',walk.routes.length)
 					thisWalk.forEach((item, idx)=>{
-						item.node.element.innerText = `${idx}`;
+						//item.element.innerText = `${idx}`;
 						if(idx === 0){
-							item.node.element.classList.add("start");
+							item.element.classList.add("start");
 						}
 						else if(idx === thisWalk.length - 1){
-							item.node.element.classList.add("end");
+							item.element.classList.add("end");
 						}
 						else{
-							item.node.element.classList.add("path");
+							item.element.classList.add("path");
 						}
 					})
 				} 
